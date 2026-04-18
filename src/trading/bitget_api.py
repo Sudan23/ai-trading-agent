@@ -235,6 +235,9 @@ class BitgetAPI:
                     max_attempts,
                     e,
                 )
+                # Non-network errors (e.g. API logic errors) are retried only
+                # once: a second identical request is unlikely to succeed, so
+                # we break early to surface the failure quickly.
                 if attempt == 0:
                     await asyncio.sleep(backoff_base)
                     continue
@@ -275,8 +278,10 @@ class BitgetAPI:
                 rounded = round(amount / multiplier) * multiplier
                 multiplier_str = str(multiplier)
                 # Use string-based decimal counting: sizeMultiplier values from
-                # the Bitget contracts endpoint are small, fixed-precision numbers
-                # (e.g. "0.001", "0.01") where string manipulation is exact.
+                # the Bitget contracts endpoint are always fixed-point numbers
+                # (e.g. "0.001", "0.01", "1.0"), never scientific notation.
+                # If an unexpected format is encountered the fallback
+                # `round(amount, 6)` at the end of the method applies.
                 if "." in multiplier_str:
                     decimals = len(multiplier_str.rstrip("0").split(".")[-1])
                 else:
@@ -548,7 +553,9 @@ class BitgetAPI:
             for o in plan_list:
                 hold_side = o.get("holdSide", "long").lower()
                 plan_type = o.get("planType", "")
-                # Closing a long needs a sell; closing a short needs a buy
+                # Closing a long needs a sell; closing a short needs a buy.
+                # `is_buy` describes the *closing* direction, which is the
+                # opposite of the *hold* direction — hence True when short.
                 is_buy = hold_side == "short"
                 orders.append(
                     {
