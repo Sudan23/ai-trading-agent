@@ -20,8 +20,8 @@ import socket
 import time
 from typing import Any
 
-import aiohttp
 import requests
+from requests.exceptions import RequestException
 
 from src.config_loader import CONFIG
 
@@ -55,6 +55,31 @@ class BitgetAPI:
         self.base_url = CONFIG.get("bitget_base_url") or BITGET_BASE_URL
         # Cached contract metadata keyed by symbol (e.g. "BTCUSDT")
         self._contracts_cache: dict[str, Any] = {}
+
+    # ------------------------------------------------------------------
+    # Response normalisation helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_list(data: dict | list, key: str = "entrustedList") -> list:
+        """Extract a list from a Bitget response ``data`` payload.
+
+        Bitget returns paginated lists under a ``key`` inside a dict, or
+        occasionally as a bare list.  This helper handles both shapes.
+
+        Args:
+            data: The ``data`` field from a Bitget API response.
+            key: Dict key whose value should be the list (default
+                ``"entrustedList"``).
+
+        Returns:
+            The extracted list, or an empty list when not found.
+        """
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get(key) or []
+        return []
 
     # ------------------------------------------------------------------
     # Symbol helpers
@@ -195,7 +220,7 @@ class BitgetAPI:
         for attempt in range(max_attempts):
             try:
                 return await asyncio.to_thread(fn, *args, **kwargs)
-            except (aiohttp.ClientError, ConnectionError, TimeoutError, socket.timeout) as e:
+            except (RequestException, ConnectionError, TimeoutError, socket.timeout) as e:
                 last_err = e
                 logging.warning(
                     "Bitget call failed (attempt %s/%s): %s", attempt + 1, max_attempts, e
@@ -249,6 +274,9 @@ class BitgetAPI:
             if multiplier > 0:
                 rounded = round(amount / multiplier) * multiplier
                 multiplier_str = str(multiplier)
+                # Use string-based decimal counting: sizeMultiplier values from
+                # the Bitget contracts endpoint are small, fixed-precision numbers
+                # (e.g. "0.001", "0.01") where string manipulation is exact.
                 if "." in multiplier_str:
                     decimals = len(multiplier_str.rstrip("0").split(".")[-1])
                 else:
@@ -434,20 +462,20 @@ class BitgetAPI:
                 "/api/v2/mix/order/orders-pending",
                 {"symbol": symbol, "productType": PRODUCT_TYPE},
             )
-            entries = (pending.get("data") or {})
-            order_list = entries.get("entrustedList") or (entries if isinstance(entries, list) else [])
+            entries = pending.get("data") or {}
+            order_list = self._extract_list(entries)
             for order in order_list:
-                oid = order.get("orderId")
-                if oid:
+                order_id = order.get("orderId")
+                if order_id:
                     try:
                         await self._retry(
                             self._post,
                             "/api/v2/mix/order/cancel-order",
-                            {"symbol": symbol, "productType": PRODUCT_TYPE, "orderId": oid},
+                            {"symbol": symbol, "productType": PRODUCT_TYPE, "orderId": order_id},
                         )
                         cancelled += 1
                     except (RuntimeError, ValueError, KeyError) as e:
-                        logging.warning("Cancel order %s error: %s", oid, e)
+                        logging.warning("Cancel order error: %s", e)
 
             # Cancel plan (TP/SL) orders
             plan_pending = await self._retry(
@@ -455,20 +483,20 @@ class BitgetAPI:
                 "/api/v2/mix/order/orders-plan-pending",
                 {"symbol": symbol, "productType": PRODUCT_TYPE},
             )
-            plan_entries = (plan_pending.get("data") or {})
-            plan_list = plan_entries.get("entrustedList") or (plan_entries if isinstance(plan_entries, list) else [])
+            plan_entries = plan_pending.get("data") or {}
+            plan_list = self._extract_list(plan_entries)
             for order in plan_list:
-                oid = order.get("orderId")
-                if oid:
+                order_id = order.get("orderId")
+                if order_id:
                     try:
                         await self._retry(
                             self._post,
                             "/api/v2/mix/order/cancel-plan-order",
-                            {"symbol": symbol, "productType": PRODUCT_TYPE, "orderId": oid},
+                            {"symbol": symbol, "productType": PRODUCT_TYPE, "orderId": order_id},
                         )
                         cancelled += 1
                     except (RuntimeError, ValueError, KeyError) as e:
-                        logging.warning("Cancel plan order %s error: %s", oid, e)
+                        logging.warning("Cancel plan order error: %s", e)
 
             return {"status": "ok", "cancelled_count": cancelled}
         except (RuntimeError, ValueError, KeyError, ConnectionError) as e:
@@ -492,7 +520,7 @@ class BitgetAPI:
                 {"productType": PRODUCT_TYPE},
             )
             entries = resp.get("data") or {}
-            order_list = entries.get("entrustedList") or (entries if isinstance(entries, list) else [])
+            order_list = self._extract_list(entries)
             for o in order_list:
                 orders.append(
                     {
@@ -516,7 +544,7 @@ class BitgetAPI:
                 {"productType": PRODUCT_TYPE},
             )
             entries = resp.get("data") or {}
-            plan_list = entries.get("entrustedList") or (entries if isinstance(entries, list) else [])
+            plan_list = self._extract_list(entries)
             for o in plan_list:
                 hold_side = o.get("holdSide", "long").lower()
                 plan_type = o.get("planType", "")
@@ -555,7 +583,7 @@ class BitgetAPI:
                 {"productType": PRODUCT_TYPE},
             )
             raw = resp.get("data") or {}
-            fill_list = raw.get("fillList") or (raw if isinstance(raw, list) else [])
+            fill_list = self._extract_list(raw, key="fillList")
             fills = []
             for f in fill_list:
                 fills.append(
@@ -632,7 +660,7 @@ class BitgetAPI:
             if total_size == 0:
                 continue
             hold_side = pos.get("holdSide", "long").lower()
-            # Positive szi = long, negative = short (matches Hyperliquid convention)
+            # Positive szi = long position size; negative szi = short position size
             szi = total_size if hold_side == "long" else -total_size
             entry_px = float(pos.get("averageOpenPrice") or 0)
             liq_px = float(pos.get("liquidationPrice") or 0) or None
