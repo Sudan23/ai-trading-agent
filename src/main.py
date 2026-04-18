@@ -6,7 +6,7 @@ import pathlib
 sys.path.append(str(pathlib.Path(__file__).parent.parent))
 from src.agent.decision_maker import TradingAgent
 from src.indicators.taapi_client import TAAPIClient
-from src.trading.hyperliquid_api import HyperliquidAPI
+from src.trading.bitget_api import BitgetAPI
 import asyncio
 import logging
 from collections import deque, OrderedDict
@@ -43,7 +43,7 @@ def get_interval_seconds(interval_str):
 def main():
     """Parse CLI args, bootstrap dependencies, and launch the trading loop."""
     clear_terminal()
-    parser = argparse.ArgumentParser(description="LLM-based Trading Agent on Hyperliquid")
+    parser = argparse.ArgumentParser(description="LLM-based Trading Agent on Bitget")
     parser.add_argument("--assets", type=str, nargs="+", required=False, help="Assets to trade, e.g., BTC ETH")
     parser.add_argument("--interval", type=str, required=False, help="Interval period, e.g., 1h")
     args = parser.parse_args()
@@ -65,7 +65,7 @@ def main():
         parser.error("Please provide --assets and --interval, or set ASSETS and INTERVAL in .env")
 
     taapi = TAAPIClient()
-    hyperliquid = HyperliquidAPI()
+    bitget = BitgetAPI()
     agent = TradingAgent()
 
 
@@ -93,7 +93,7 @@ def main():
             minutes_since_start = (datetime.now(timezone.utc) - start_time).total_seconds() / 60
 
             # Global account state
-            state = await hyperliquid.get_user_state()
+            state = await bitget.get_user_state()
             total_value = state.get('total_value') or state['balance'] + sum(p.get('pnl', 0) for p in state['positions'])
             sharpe = calculate_sharpe(trade_log)
 
@@ -106,7 +106,7 @@ def main():
             for pos_wrap in state['positions']:
                 pos = pos_wrap
                 coin = pos.get('coin')
-                current_px = await hyperliquid.get_current_price(coin) if coin else None
+                current_px = await bitget.get_current_price(coin) if coin else None
                 positions.append({
                     "symbol": coin,
                     "quantity": round_or_none(pos.get('szi'), 6),
@@ -129,7 +129,7 @@ def main():
 
             open_orders_struct = []
             try:
-                open_orders = await hyperliquid.get_open_orders()
+                open_orders = await bitget.get_open_orders()
                 for o in open_orders[:50]:
                     open_orders_struct.append({
                         "coin": o.get('coin'),
@@ -171,7 +171,7 @@ def main():
 
             recent_fills_struct = []
             try:
-                fills = await hyperliquid.get_recent_fills(limit=50)
+                fills = await bitget.get_recent_fills(limit=50)
                 for f_entry in fills[-20:]:
                     try:
                         t_raw = f_entry.get('time') or f_entry.get('timestamp')
@@ -226,13 +226,13 @@ def main():
             asset_prices = {}
             for asset in args.assets:
                 try:
-                    current_price = await hyperliquid.get_current_price(asset)
+                    current_price = await bitget.get_current_price(asset)
                     asset_prices[asset] = current_price
                     if asset not in price_history:
                         price_history[asset] = deque(maxlen=60)
                     price_history[asset].append({"t": datetime.now(timezone.utc).isoformat(), "mid": round_or_none(current_price, 2)})
-                    oi = await hyperliquid.get_open_interest(asset)
-                    funding = await hyperliquid.get_funding_rate(asset)
+                    oi = await bitget.get_open_interest(asset)
+                    funding = await bitget.get_funding_rate(asset)
 
                     intraday_tf = "5m"
                     ema_series = taapi.fetch_series("ema", f"{asset}/USDT", intraday_tf, results=10, params={"period": 20}, value_key="value")
@@ -372,10 +372,10 @@ def main():
                             continue
                         amount = alloc_usd / current_price
 
-                        order = await hyperliquid.place_buy_order(asset, amount) if is_buy else await hyperliquid.place_sell_order(asset, amount)
+                        order = await bitget.place_buy_order(asset, amount) if is_buy else await bitget.place_sell_order(asset, amount)
                         # Confirm by checking recent fills for this asset shortly after placing
                         await asyncio.sleep(1)
-                        fills_check = await hyperliquid.get_recent_fills(limit=10)
+                        fills_check = await bitget.get_recent_fills(limit=10)
                         filled = False
                         for fc in reversed(fills_check):
                             try:
@@ -388,13 +388,13 @@ def main():
                         tp_oid = None
                         sl_oid = None
                         if output["tp_price"]:
-                            tp_order = await hyperliquid.place_take_profit(asset, is_buy, amount, output["tp_price"])
-                            tp_oids = hyperliquid.extract_oids(tp_order)
+                            tp_order = await bitget.place_take_profit(asset, is_buy, amount, output["tp_price"])
+                            tp_oids = bitget.extract_oids(tp_order)
                             tp_oid = tp_oids[0] if tp_oids else None
                             add_event(f"TP placed {asset} at {output['tp_price']}")
                         if output["sl_price"]:
-                            sl_order = await hyperliquid.place_stop_loss(asset, is_buy, amount, output["sl_price"])
-                            sl_oids = hyperliquid.extract_oids(sl_order)
+                            sl_order = await bitget.place_stop_loss(asset, is_buy, amount, output["sl_price"])
+                            sl_oids = bitget.extract_oids(sl_order)
                             sl_oid = sl_oids[0] if sl_oids else None
                             add_event(f"SL placed {asset} at {output['sl_price']}")
                         # Reconcile: if opposite-side position exists or TP/SL just filled, clear stale active_trades for this asset
@@ -533,7 +533,7 @@ def main():
         std = math.sqrt(var) if var > 0 else 0
         return mean / std if std > 0 else 0
 
-    async def check_exit_condition(trade, taapi, hyperliquid):
+    async def check_exit_condition(trade, taapi, bitget):
         """Evaluate whether a given trade's exit plan triggers a close."""
         plan = (trade.get("exit_plan") or "").lower()
         if not plan:
@@ -545,7 +545,7 @@ def main():
                 return macd < threshold
             if "close above ema50" in plan:
                 ema50 = taapi.get_historical_indicator("ema", f"{trade['asset']}/USDT", "4h", results=1, params={"period": 50})[0]["value"]
-                current = await hyperliquid.get_current_price(trade["asset"])
+                current = await bitget.get_current_price(trade["asset"])
                 return current > ema50
         except Exception:
             return False

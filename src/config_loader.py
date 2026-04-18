@@ -70,11 +70,11 @@ def _get_list(name: str, default: list[str] | None = None) -> list[str] | None:
 
 CONFIG = {
     "taapi_api_key": _get_env("TAAPI_API_KEY", required=True),
-    "hyperliquid_private_key": _get_env("HYPERLIQUID_PRIVATE_KEY") or _get_env("LIGHTER_PRIVATE_KEY"),
-    "mnemonic": _get_env("MNEMONIC"),
-    # Hyperliquid network/base URL overrides
-    "hyperliquid_base_url": _get_env("HYPERLIQUID_BASE_URL"),
-    "hyperliquid_network": _get_env("HYPERLIQUID_NETWORK", "mainnet"),
+    # Bitget credentials
+    "bitget_api_key": _get_env("BITGET_API_KEY", required=True),
+    "bitget_api_secret": _get_env("BITGET_API_SECRET", required=True),
+    "bitget_passphrase": _get_env("BITGET_PASSPHRASE", required=True),
+    "bitget_base_url": _get_env("BITGET_BASE_URL"),
     # LLM via OpenRouter
     "openrouter_api_key": _get_env("OPENROUTER_API_KEY", required=True),
     "openrouter_base_url": _get_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
